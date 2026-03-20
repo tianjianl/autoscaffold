@@ -9,15 +9,16 @@ wheels/
 # Virtual environments
 .venv
 worktrees/
-results/
-queue/
 
-# Agent prompt files (generated per-session by launchers)
+# Generation outputs (stored in scratch)
+*.jsonl
+*.json
+!pyproject.toml
+
+# SLURM logs
+*.out
+*.err
+
+# Agent prompt files
 CLAUDE.md
 AGENTS.md
-
-# Experimental code/artifacts
-dev/
-
-# Results file
-results.tsv
