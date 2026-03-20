@@ -23,6 +23,7 @@ from collections import Counter
 
 import requests
 from datasets import load_dataset
+from math_verify import parse, verify
 
 OPENAI_URL = "https://api.openai.com/v1"
 
@@ -288,27 +289,42 @@ def download_results(api_key, batch, output_path):
     results = []
     for problem_idx in sorted(samples.keys()):
         problem_samples = samples[problem_idx]
-        # Collect (raw_boxed, normalized_boxed, content) for each sample
+        # Collect (raw_boxed, content) for each sample
         answer_data = []
         for content, usage, error in problem_samples:
             if error or not content:
                 continue
             boxed = extract_boxed(content)
             if boxed is not None:
-                norm = normalize_answer(boxed)
-                answer_data.append((boxed, norm, content))
+                answer_data.append((boxed, content))
 
         if answer_data:
-            # Vote on normalized answers
-            norm_counter = Counter(norm for _, norm, _ in answer_data)
-            best_norm, count = norm_counter.most_common(1)[0]
-            # Use the full response that contains the winning answer
-            best_content = None
-            for raw, norm, content in answer_data:
-                if norm == best_norm:
-                    best_content = content
-                    break
-            model_answer = best_content or f"\\boxed{{{answer_data[0][0]}}}"
+            # Group equivalent answers using math_verify
+            groups = []  # list of (representative_boxed, content, count)
+            for boxed, content in answer_data:
+                matched = False
+                boxed_text = f"${boxed}$"
+                try:
+                    parsed_new = parse(boxed_text)
+                except Exception:
+                    parsed_new = None
+                if parsed_new:
+                    for i, (rep_boxed, rep_content, count) in enumerate(groups):
+                        try:
+                            rep_parsed = parse(f"${rep_boxed}$")
+                            if rep_parsed and verify(rep_parsed, parsed_new):
+                                groups[i] = (rep_boxed, rep_content, count + 1)
+                                matched = True
+                                break
+                        except Exception:
+                            continue
+                if not matched:
+                    groups.append((boxed, content, 1))
+
+            # Pick the group with the most votes
+            groups.sort(key=lambda g: g[2], reverse=True)
+            best_boxed, best_content, best_count = groups[0]
+            model_answer = best_content or f"\\boxed{{{best_boxed}}}"
         else:
             # No valid boxed answers from any sample — use first non-empty response
             model_answer = ""
