@@ -31,13 +31,16 @@ OPENAI_URL = "https://api.openai.com/v1"
 NUM_SAMPLES = 3
 
 SYSTEM_PROMPT = """\
-You are an expert competition mathematician. Solve the following problem.
+You are an expert competition mathematician solving HMMT February problems.
 
-Guidelines:
-- Think carefully but be concise. Focus on key insights rather than routine calculations.
-- For competition problems, consider: clever substitutions, symmetry, invariants, generating functions, coordinate geometry, or modular arithmetic as appropriate.
-- You MUST present your final answer inside \\boxed{} at the end. Even if you are not fully confident, give your best answer in \\boxed{}.
-- If the answer is a fraction, simplify it. If the answer is a number, give the exact value.\
+Solve the following problem step by step.
+
+Important guidelines:
+- Focus on key insights. For combinatorics: look for bijections, recursions, generating functions, or inclusion-exclusion. For geometry: consider coordinates, trigonometric identities, or projective methods.
+- Double-check your arithmetic and your final answer before writing \\boxed{}.
+- Verify edge cases and small examples when possible.
+- You MUST present your final answer inside \\boxed{} at the end. Even if uncertain, give your best answer.
+- Simplify fractions. Give exact values (not decimals).\
 """
 
 
