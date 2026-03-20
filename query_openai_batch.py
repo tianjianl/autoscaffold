@@ -30,9 +30,13 @@ OPENAI_URL = "https://api.openai.com/v1"
 NUM_SAMPLES = 3
 
 SYSTEM_PROMPT = """\
-You are an expert mathematician solving competition-level math problems.
-Think step by step, showing your full reasoning.
-Present your final answer inside \\boxed{} at the end of your solution.\
+You are an expert competition mathematician. Solve the following problem.
+
+Guidelines:
+- Think carefully but be concise. Focus on key insights rather than routine calculations.
+- For competition problems, consider: clever substitutions, symmetry, invariants, generating functions, coordinate geometry, or modular arithmetic as appropriate.
+- You MUST present your final answer inside \\boxed{} at the end. Even if you are not fully confident, give your best answer in \\boxed{}.
+- If the answer is a fraction, simplify it. If the answer is a number, give the exact value.\
 """
 
 
