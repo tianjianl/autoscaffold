@@ -91,12 +91,16 @@ The agent should use descriptive filenames when running multiple experiments, e.
 - **Metric**: Accuracy on HMMT Feb 2026 (33 problems, graded by `math_verify`).
 - **Dataset**: [MathArena/hmmt_feb_2026](https://huggingface.co/datasets/MathArena/hmmt_feb_2026)
 
-## Scaffold strategies to explore
+## Possible strategies
 
-1. **Majority voting (best-of-N)**: Generate K solutions per problem, extract `\boxed{}` answers, take the most common answer.
-2. **Self-verification**: Generate a solution, then ask the model to verify/critique it, optionally re-solve.
-3. **Model-aggregated consensus**: Generate N solutions, feed all to the model to pick the best answer.
-4. **Adaptive token allocation**: Spend more tokens on harder problems (geometry/combinatorics), fewer on easier ones (number theory).
+Some ideas that may help (not prescriptive):
+
+- **Majority voting (best-of-N)**: Generate K solutions per problem, extract `\boxed{}` answers, take the most frequent.
+- **Prompt engineering**: Modify system/user prompts to reduce common failure modes.
+- **Self-verification**: Multi-round: generate solutions, then ask the model to verify/critique/correct.
+- **Model-aggregated consensus**: Generate N solutions, then ask the model to pick the best answer.
+- **Adaptive token allocation**: Spend more tokens on harder problem types, fewer on easier ones.
+- **Hybrid approaches**: Combine any of the above.
 
 ## Project structure
 
