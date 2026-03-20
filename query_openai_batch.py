@@ -16,13 +16,18 @@ Workflow:
 import argparse
 import json
 import os
+import re
 import sys
 import time
+from collections import Counter
 
 import requests
 from datasets import load_dataset
 
 OPENAI_URL = "https://api.openai.com/v1"
+
+# Number of samples per problem for majority voting
+NUM_SAMPLES = 3
 
 SYSTEM_PROMPT = """\
 You are an expert mathematician solving competition-level math problems.
@@ -31,32 +36,65 @@ Present your final answer inside \\boxed{} at the end of your solution.\
 """
 
 
+def extract_boxed(text):
+    """Extract the last \\boxed{...} answer from text, handling nested braces."""
+    if not text:
+        return None
+    # Find all \boxed{ positions
+    results = []
+    start = 0
+    while True:
+        pos = text.find("\\boxed{", start)
+        if pos == -1:
+            break
+        # Find matching closing brace
+        depth = 0
+        i = pos + 7  # skip past \boxed{
+        begin = i
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                if depth == 0:
+                    results.append(text[begin:i])
+                    break
+                depth -= 1
+            i += 1
+        start = pos + 1
+    if results:
+        return results[-1]  # Return the last \boxed{} match
+    return None
+
+
 def make_batch_jsonl(dataset_name, model, max_completion_tokens, temperature,
                      output_path):
-    """Create the batch input JSONL file."""
+    """Create the batch input JSONL file with NUM_SAMPLES requests per problem."""
     ds = load_dataset(dataset_name, split="train")
     print(f"Loaded {len(ds)} problems")
 
+    n_requests = 0
     with open(output_path, "w") as f:
         for row in ds:
             idx = row["problem_idx"]
-            request = {
-                "custom_id": f"problem-{idx}",
-                "method": "POST",
-                "url": "/v1/chat/completions",
-                "body": {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": row["problem"]},
-                    ],
-                    "max_completion_tokens": max_completion_tokens,
-                    "temperature": temperature,
-                },
-            }
-            f.write(json.dumps(request) + "\n")
+            for k in range(NUM_SAMPLES):
+                request = {
+                    "custom_id": f"problem-{idx}-sample-{k}",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": row["problem"]},
+                        ],
+                        "max_completion_tokens": max_completion_tokens,
+                        "temperature": temperature,
+                    },
+                }
+                f.write(json.dumps(request) + "\n")
+                n_requests += 1
 
-    print(f"Wrote {len(ds)} requests to {output_path}")
+    print(f"Wrote {n_requests} requests ({len(ds)} problems x {NUM_SAMPLES} samples) to {output_path}")
     return output_path
 
 
@@ -118,7 +156,12 @@ def wait_for_batch(api_key, batch_id, poll_interval=30):
     """Poll until batch completes."""
     print(f"Waiting for batch {batch_id}...")
     while True:
-        batch = check_batch(api_key, batch_id)
+        try:
+            batch = check_batch(api_key, batch_id)
+        except requests.exceptions.RequestException as e:
+            print(f"  Poll error (will retry): {e}")
+            time.sleep(poll_interval)
+            continue
         status = batch["status"]
         counts = batch.get("request_counts", {})
         completed = counts.get("completed", 0)
@@ -135,7 +178,7 @@ def wait_for_batch(api_key, batch_id, poll_interval=30):
 
 
 def download_results(api_key, batch, output_path):
-    """Download batch results and convert to grade.py format."""
+    """Download batch results, apply majority voting, and convert to grade.py format."""
     output_file_id = batch.get("output_file_id")
     error_file_id = batch.get("error_file_id")
 
@@ -170,8 +213,8 @@ def download_results(api_key, batch, output_path):
         f.write(resp.text)
     print(f"Raw output saved to: {raw_path}")
 
-    # Convert to grade.py format
-    results = []
+    # Collect all samples per problem
+    samples = {}  # problem_idx -> list of (content, usage)
     total_prompt = 0
     total_completion = 0
     total_reasoning = 0
@@ -180,20 +223,16 @@ def download_results(api_key, batch, output_path):
         if not line.strip():
             continue
         obj = json.loads(line)
-        custom_id = obj["custom_id"]  # "problem-N"
-        problem_idx = int(custom_id.split("-")[1])
+        custom_id = obj["custom_id"]  # "problem-N-sample-K"
+        parts = custom_id.split("-")
+        problem_idx = int(parts[1])
 
         response = obj.get("response", {})
         body = response.get("body", {})
         error = obj.get("error")
 
         if error:
-            results.append({
-                "problem_idx": problem_idx,
-                "model_answer": "",
-                "error": str(error),
-                "usage": {},
-            })
+            samples.setdefault(problem_idx, []).append(("", {}, str(error)))
             continue
 
         choices = body.get("choices", [])
@@ -210,21 +249,47 @@ def download_results(api_key, batch, output_path):
         if choices:
             message = choices[0].get("message", {})
             content = message.get("content") or ""
-            finish_reason = choices[0].get("finish_reason", "unknown")
         else:
             content = ""
-            finish_reason = "no_choices"
+
+        samples.setdefault(problem_idx, []).append((content, usage, None))
+
+    # Majority vote for each problem
+    results = []
+    for problem_idx in sorted(samples.keys()):
+        problem_samples = samples[problem_idx]
+        answers = []
+        for content, usage, error in problem_samples:
+            if error or not content:
+                continue
+            boxed = extract_boxed(content)
+            if boxed is not None:
+                answers.append(boxed)
+
+        if answers:
+            # Take most common answer
+            counter = Counter(answers)
+            best_answer, count = counter.most_common(1)[0]
+            # Use the full response that contains the winning answer
+            best_content = None
+            for content, usage, error in problem_samples:
+                if extract_boxed(content) == best_answer:
+                    best_content = content
+                    break
+            model_answer = best_content or f"\\boxed{{{best_answer}}}"
+        else:
+            # No valid boxed answers from any sample — use first non-empty response
+            model_answer = ""
+            for content, usage, error in problem_samples:
+                if content:
+                    model_answer = content
+                    break
 
         results.append({
             "problem_idx": problem_idx,
-            "model_answer": content,
-            "finish_reason": finish_reason,
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "reasoning_tokens": reasoning_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
+            "model_answer": model_answer,
+            "num_samples": len(problem_samples),
+            "num_valid_answers": len(answers) if answers else 0,
             "error": None,
         })
 
