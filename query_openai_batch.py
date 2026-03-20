@@ -292,19 +292,21 @@ def download_results(api_key, batch, output_path):
     results = []
     for problem_idx in sorted(samples.keys()):
         problem_samples = samples[problem_idx]
-        # Collect (raw_boxed, content) for each sample
+        # Collect (raw_boxed, content, reasoning_tokens) for each sample
         answer_data = []
         for content, usage, error in problem_samples:
             if error or not content:
                 continue
             boxed = extract_boxed(content)
             if boxed is not None:
-                answer_data.append((boxed, content))
+                rt = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+                answer_data.append((boxed, content, rt))
 
         if answer_data:
             # Group equivalent answers using math_verify
-            groups = []  # list of (representative_boxed, content, count)
-            for boxed, content in answer_data:
+            # Track total reasoning tokens per group as tiebreaker
+            groups = []  # list of (representative_boxed, best_content, count, max_reasoning)
+            for boxed, content, rt in answer_data:
                 matched = False
                 boxed_text = f"${boxed}$"
                 try:
@@ -312,21 +314,25 @@ def download_results(api_key, batch, output_path):
                 except Exception:
                     parsed_new = None
                 if parsed_new:
-                    for i, (rep_boxed, rep_content, count) in enumerate(groups):
+                    for i, (rep_boxed, rep_content, count, max_rt) in enumerate(groups):
                         try:
                             rep_parsed = parse(f"${rep_boxed}$")
                             if rep_parsed and verify(rep_parsed, parsed_new):
-                                groups[i] = (rep_boxed, rep_content, count + 1)
+                                # Keep the content from the sample with most reasoning
+                                if rt > max_rt:
+                                    groups[i] = (rep_boxed, content, count + 1, rt)
+                                else:
+                                    groups[i] = (rep_boxed, rep_content, count + 1, max_rt)
                                 matched = True
                                 break
                         except Exception:
                             continue
                 if not matched:
-                    groups.append((boxed, content, 1))
+                    groups.append((boxed, content, 1, rt))
 
-            # Pick the group with the most votes
-            groups.sort(key=lambda g: g[2], reverse=True)
-            best_boxed, best_content, best_count = groups[0]
+            # Pick the group with the most votes; break ties by reasoning tokens
+            groups.sort(key=lambda g: (g[2], g[3]), reverse=True)
+            best_boxed, best_content, best_count, _ = groups[0]
             model_answer = best_content or f"\\boxed{{{best_boxed}}}"
         else:
             # No valid boxed answers from any sample — use first non-empty response
