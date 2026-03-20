@@ -70,6 +70,32 @@ def extract_boxed(text):
     return None
 
 
+def normalize_answer(ans):
+    """Normalize a LaTeX answer string for comparison during majority voting.
+
+    Handles common formatting differences:
+    - \\tfrac, \\dfrac -> \\frac
+    - Whitespace normalization
+    - a/b -> \\frac{a}{b} for simple fractions
+    """
+    if ans is None:
+        return None
+    s = ans.strip()
+    # Remove leading/trailing whitespace variants (\\, and friends)
+    s = s.strip('\\,').strip()
+    # Normalize fraction commands
+    s = s.replace("\\tfrac", "\\frac").replace("\\dfrac", "\\frac")
+    # Normalize whitespace
+    s = re.sub(r'\s+', ' ', s).strip()
+    # Convert simple "a/b" to "\frac{a}{b}" if no backslash commands present
+    # Match patterns like "123/456" or "7\sqrt{3}/3"
+    simple_frac = re.match(r'^([^/]+)/(\d+)$', s)
+    if simple_frac and '\\frac' not in s:
+        num, den = simple_frac.groups()
+        s = f"\\frac{{{num.strip()}}}{{{den.strip()}}}"
+    return s
+
+
 def make_batch_jsonl(dataset_name, model, max_completion_tokens, temperature,
                      output_path):
     """Create the batch input JSONL file with NUM_SAMPLES requests per problem."""
@@ -262,25 +288,27 @@ def download_results(api_key, batch, output_path):
     results = []
     for problem_idx in sorted(samples.keys()):
         problem_samples = samples[problem_idx]
-        answers = []
+        # Collect (raw_boxed, normalized_boxed, content) for each sample
+        answer_data = []
         for content, usage, error in problem_samples:
             if error or not content:
                 continue
             boxed = extract_boxed(content)
             if boxed is not None:
-                answers.append(boxed)
+                norm = normalize_answer(boxed)
+                answer_data.append((boxed, norm, content))
 
-        if answers:
-            # Take most common answer
-            counter = Counter(answers)
-            best_answer, count = counter.most_common(1)[0]
+        if answer_data:
+            # Vote on normalized answers
+            norm_counter = Counter(norm for _, norm, _ in answer_data)
+            best_norm, count = norm_counter.most_common(1)[0]
             # Use the full response that contains the winning answer
             best_content = None
-            for content, usage, error in problem_samples:
-                if extract_boxed(content) == best_answer:
+            for raw, norm, content in answer_data:
+                if norm == best_norm:
                     best_content = content
                     break
-            model_answer = best_content or f"\\boxed{{{best_answer}}}"
+            model_answer = best_content or f"\\boxed{{{answer_data[0][0]}}}"
         else:
             # No valid boxed answers from any sample — use first non-empty response
             model_answer = ""
@@ -293,7 +321,7 @@ def download_results(api_key, batch, output_path):
             "problem_idx": problem_idx,
             "model_answer": model_answer,
             "num_samples": len(problem_samples),
-            "num_valid_answers": len(answers) if answers else 0,
+            "num_valid_answers": len(answer_data) if answer_data else 0,
             "error": None,
         })
 
