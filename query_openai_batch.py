@@ -35,8 +35,9 @@ Important guidelines:
 - Think carefully about the problem before diving into computation.
 - Double-check your arithmetic and your final answer before writing \\boxed{}.
 - Verify your answer against the problem constraints.
-- You MUST present your final answer inside \\boxed{} at the end.
-- Simplify fractions. Give exact values (not decimals).\
+- You MUST write your final answer using LaTeX \\boxed{} notation, e.g. \\boxed{42} or \\boxed{\\frac{3}{7}}.
+- Simplify fractions. Give exact values (not decimals).
+- CRITICAL: Your response MUST end with \\boxed{answer}. No other format is accepted.\
 """
 
 TYPE_SYSTEM_PROMPTS = {
@@ -51,7 +52,7 @@ Strategy guidance:
 - Identify key relationships before computing.
 - Watch for degenerate cases and hidden symmetry.
 - Double-check your arithmetic and verify your answer satisfies all given constraints.
-- You MUST present your final answer inside \\boxed{} at the end.
+- You MUST write your final answer using LaTeX \\boxed{} notation. CRITICAL: end with \\boxed{answer}.
 - Simplify fractions. Give exact values (not decimals).\
 """,
     "Combinatorics": """\
@@ -65,7 +66,7 @@ Strategy guidance:
 - Be systematic about counting: clearly define what you're counting, check for overcounting.
 - After finding your answer, sanity-check against small cases and order of magnitude.
 - Double-check your arithmetic.
-- You MUST present your final answer inside \\boxed{} at the end.
+- You MUST write your final answer using LaTeX \\boxed{} notation. CRITICAL: end with \\boxed{answer}.
 - Simplify fractions. Give exact values (not decimals).\
 """,
     "Number Theory": """\
@@ -79,7 +80,7 @@ Strategy guidance:
 - Check small cases to identify patterns.
 - For Diophantine equations, look for bounds and factor-based arguments.
 - Verify your answer satisfies all conditions in the problem.
-- You MUST present your final answer inside \\boxed{} at the end.
+- You MUST write your final answer using LaTeX \\boxed{} notation. CRITICAL: end with \\boxed{answer}.
 - Simplify fractions. Give exact values (not decimals).\
 """,
     "Algebra": """\
@@ -93,7 +94,7 @@ Strategy guidance:
 - Check your answer by substituting back into the original equations.
 - Watch for extraneous solutions from squaring or other non-invertible operations.
 - Double-check your arithmetic.
-- You MUST present your final answer inside \\boxed{} at the end.
+- You MUST write your final answer using LaTeX \\boxed{} notation. CRITICAL: end with \\boxed{answer}.
 - Simplify fractions. Give exact values (not decimals).\
 """,
 }
@@ -198,6 +199,12 @@ def make_adjudicate_batch_jsonl(dataset, all_samples, candidates, model,
 
             all_solutions_text = "\n\n".join(solution_texts)
 
+            # Summarize candidate answers with vote counts
+            vote_lines = []
+            for ans, count in idx_candidates:
+                vote_lines.append(f"  - \\boxed{{{ans}}} ({count} vote{'s' if count != 1 else ''})")
+            vote_summary = "\n".join(vote_lines)
+
             types = row.get("problem_type", [])
             primary_type = types[0].strip() if types else ""
             system_prompt = TYPE_SYSTEM_PROMPTS.get(primary_type, SYSTEM_PROMPT)
@@ -206,12 +213,13 @@ def make_adjudicate_batch_jsonl(dataset, all_samples, candidates, model,
                 f"{row['problem']}\n\n"
                 f"{len(solution_texts)} mathematicians solved this problem independently. "
                 f"Here are their solutions:\n\n{all_solutions_text}\n\n"
-                f"These solutions produced different answers. Your job:\n"
-                f"1. Check the mathematical reasoning in each solution step by step.\n"
-                f"2. Identify any errors in reasoning or computation.\n"
-                f"3. Determine which solution (if any) arrives at the correct answer.\n"
-                f"4. If none are fully correct, solve the problem yourself using insights "
-                f"from the solutions.\n\n"
+                f"The proposed answers and their vote counts:\n{vote_summary}\n\n"
+                f"These solutions disagree. Your job as the judge:\n"
+                f"1. For EACH proposed answer above, independently verify whether it is "
+                f"correct by checking it against the problem constraints.\n"
+                f"2. Check the mathematical reasoning in each solution for errors.\n"
+                f"3. A minority answer can be correct — do not assume the majority is right.\n"
+                f"4. If no proposed answer is correct, solve the problem yourself.\n\n"
                 f"Present your final answer in \\boxed{{}}."
             )
 
