@@ -205,22 +205,26 @@ def make_adjudicate_batch_jsonl(dataset, all_samples, candidates, model,
                 vote_lines.append(f"  - \\boxed{{{ans}}} ({count} vote{'s' if count != 1 else ''})")
             vote_summary = "\n".join(vote_lines)
 
-            types = row.get("problem_type", [])
-            primary_type = types[0].strip() if types else ""
-            system_prompt = TYPE_SYSTEM_PROMPTS.get(primary_type, SYSTEM_PROMPT)
+            judge_system = (
+                "You are a mathematics competition judge. Your ONLY job is to determine "
+                "which of the given solutions is correct. You are NOT solving from scratch.\n\n"
+                "Method:\n"
+                "1. For each solution, trace the reasoning step by step.\n"
+                "2. Find the FIRST error in each incorrect solution.\n"
+                "3. The solution with no errors (or the least serious error) has the "
+                "correct answer.\n"
+                "4. A minority answer can be correct — vote counts do not determine truth.\n"
+                "5. You MUST pick one of the proposed answers. Do not introduce a new answer.\n\n"
+                "Write your final answer using LaTeX \\boxed{} notation."
+            )
 
             user_content = (
                 f"{row['problem']}\n\n"
                 f"{len(solution_texts)} mathematicians solved this problem independently. "
                 f"Here are their solutions:\n\n{all_solutions_text}\n\n"
                 f"The proposed answers and their vote counts:\n{vote_summary}\n\n"
-                f"These solutions disagree. Your job as the judge:\n"
-                f"1. For EACH proposed answer above, independently verify whether it is "
-                f"correct by checking it against the problem constraints.\n"
-                f"2. Check the mathematical reasoning in each solution for errors.\n"
-                f"3. A minority answer can be correct — do not assume the majority is right.\n"
-                f"4. If no proposed answer is correct, solve the problem yourself.\n\n"
-                f"Present your final answer in \\boxed{{}}."
+                f"Which answer is correct? Trace each solution's reasoning to find errors. "
+                f"Then give the correct answer in \\boxed{{}}."
             )
 
             request = {
@@ -230,7 +234,7 @@ def make_adjudicate_batch_jsonl(dataset, all_samples, candidates, model,
                 "body": {
                     "model": model,
                     "messages": [
-                        {"role": "system", "content": system_prompt},
+                        {"role": "system", "content": judge_system},
                         {"role": "user", "content": user_content},
                     ],
                     "max_completion_tokens": max_completion_tokens,
