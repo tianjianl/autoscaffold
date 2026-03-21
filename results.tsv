@@ -1,0 +1,23 @@
+commit	accuracy	tokens_used	status	description
+8bdc09b	19/33	541552	keep	baseline
+269d7ba	22/33	1650670	keep	majority vote K=3
+b97d603	23/33	1468448	keep	improved prompt + K=3 (concise reasoning + always boxed)
+fac501e	19/33	2012394	discard	K=4 regressed (combinatorics/geometry worse + over budget)
+2c571b2	18/33	1874736	discard	K=5 16K max tokens (too many EMPTY_PREDICTION from cap)
+0f3d356	19/33	2116615	discard	K=5 20K max tokens (still too many empty + over budget)
+09884e7	19/33	1559459	keep	answer normalization for voting (unlucky draw but good structural change)
+6a617ea	23/33	1498812	keep	math_verify semantic voting (NT 8/8 perfect + fewer tokens)
+3f4936e	23/33	1650469	keep	HMMT-specific prompt v3 (0 empty predictions + more tokens)
+51c5ca5	22/33	2049347	discard	two-phase adaptive K=3+2 (over budget + no improvement)
+2501926	22/33	1796160	discard	dual-approach prompt (solve two ways - no improvement)
+618fa0e	22/33	1515082	discard	minimal prompt K=3 (Combo 7/12 best but overall 22)
+1bbec92	22/33	2050153	discard	minimal prompt K=4 (over budget + no improvement)
+3f4936e	20/33	1674553	discard	v3 prompt re-run (unlucky draw shows variance)
+83f3b7c	22/33	1650337	discard	hybrid prompt (detailed + minimal alternating)
+cd12486	22/33	1549614	keep	reasoning-weighted tiebreaker (structural improvement)
+bacae69	21/33	1707922	discard	user-prompt verification instruction (hurt NT score)
+386da4d	21/33	1545816	discard	no system prompt (NT dropped to 6/8)
+753af81	19/33	2382293	discard	reasoning_effort=high (way over budget + 13 empty)
+dcc8d0f	22/33	1683101	discard	reasoning_effort=medium (no improvement)
+9bb1c7c	19/33	1668228	discard	n=3 API param (less diverse samples despite token savings)
+cd12486	20/33	1611557	discard	final run with best config (unlucky draw)
