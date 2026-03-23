@@ -1,0 +1,14 @@
+commit	accuracy	tokens_used	status	description
+92a8557	24/33	1869356	keep	K=3 type-specific prompts + contested adjudication
+da6e18c	26/33	1912470	keep	stronger boxed formatting + verification-focused adjudication + 40K tokens
+c9b584a	24/33	2096178	discard	diverse prompting (more contested but adjudicator overrode 2 correct answers)
+fa7334c	23/33	2082571	discard	conservative adjudication (rejected 2 novel correct answers + variance)
+959f05a	21/33	2033957	discard	3-phase adaptive K + falsification (K=2 hurt + falsification 0 overrides)
+da6e18c	24/33	1921126	discard	50K max tokens (more contested + adjudicator errors from variance)
+cec92a8	23/33	1946172	discard	enhanced combinatorics prompt (no improvement + variance)
+da6e18c	22/33	2061403	discard	v2 rerun (confirms 26/33 was lucky - true expected ~23)
+82e36d6	25/33	2090936	keep	specialized judge prompt (analyze not re-solve) - stable improvement
+2b1a17b	22/33	2333958	discard	cross-verification per request (over budget + no improvement)
+82e36d6	22/33	2106023	discard	judge rerun (25/33 was also lucky - true expected ~23)
+e171710	24/33	2075084	discard	forced critique phase (0/18 overrides - self-correction definitively dead)
+82e36d6	21/33	1901053	keep	final confirmation run (unlucky variance - confirms 21-26 range)
