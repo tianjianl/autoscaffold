@@ -250,8 +250,8 @@ def make_adjudicate_batch_jsonl(dataset, all_samples, candidates, model,
     with open(output_path, "w") as f:
         for idx in sorted(all_samples.keys()):
             idx_candidates = candidates.get(idx, [])
-            if len(idx_candidates) <= 1:
-                continue  # unanimous or no valid answers — skip
+            if not idx_candidates:
+                continue  # no valid answers — skip
 
             row = ds_by_idx.get(idx)
             if not row:
@@ -276,18 +276,32 @@ def make_adjudicate_batch_jsonl(dataset, all_samples, candidates, model,
                 vote_lines.append(f"  - \\boxed{{{ans}}} ({count} vote{'s' if count != 1 else ''})")
             vote_summary = "\n".join(vote_lines)
 
-            judge_system = (
-                "You are a mathematics competition judge. Your ONLY job is to determine "
-                "which of the given solutions is correct. You are NOT solving from scratch.\n\n"
-                "Method:\n"
-                "1. For each solution, trace the reasoning step by step.\n"
-                "2. Find the FIRST error in each incorrect solution.\n"
-                "3. The solution with no errors (or the least serious error) has the "
-                "correct answer.\n"
-                "4. A minority answer can be correct — vote counts do not determine truth.\n"
-                "5. You MUST pick one of the proposed answers. Do not introduce a new answer.\n\n"
-                "Write your final answer using LaTeX \\boxed{} notation."
-            )
+            is_unanimous = len(idx_candidates) == 1
+
+            if is_unanimous:
+                judge_system = (
+                    "You are a mathematics competition judge reviewing solutions.\n\n"
+                    "All solvers arrived at the same answer. Your job:\n"
+                    "1. Trace the reasoning in each solution step by step.\n"
+                    "2. Look for shared errors — if all solutions make the same "
+                    "mistake, the unanimous answer could still be wrong.\n"
+                    "3. If you find an error, solve the problem yourself correctly.\n"
+                    "4. If all solutions are correct, confirm the answer.\n\n"
+                    "Write your final answer using LaTeX \\boxed{} notation."
+                )
+            else:
+                judge_system = (
+                    "You are a mathematics competition judge. Your ONLY job is to determine "
+                    "which of the given solutions is correct. You are NOT solving from scratch.\n\n"
+                    "Method:\n"
+                    "1. For each solution, trace the reasoning step by step.\n"
+                    "2. Find the FIRST error in each incorrect solution.\n"
+                    "3. The solution with no errors (or the least serious error) has the "
+                    "correct answer.\n"
+                    "4. A minority answer can be correct — vote counts do not determine truth.\n"
+                    "5. You MUST pick one of the proposed answers. Do not introduce a new answer.\n\n"
+                    "Write your final answer using LaTeX \\boxed{} notation."
+                )
 
             user_content = (
                 f"{row['problem']}\n\n"
@@ -315,7 +329,7 @@ def make_adjudicate_batch_jsonl(dataset, all_samples, candidates, model,
             f.write(json.dumps(request) + "\n")
             n_requests += 1
 
-    print(f"Wrote {n_requests} adjudication requests (contested problems only)")
+    print(f"Wrote {n_requests} adjudication requests (all problems with answers)")
     return output_path
 
 
@@ -889,13 +903,15 @@ def main():
             groups.sort(key=lambda g: g[1], reverse=True)
             combined_candidates[idx] = groups
 
-        # Run adjudication for problems with >1 distinct answer
+        # Run adjudication for ALL problems (not just contested)
         phase3_tokens = {"prompt": 0, "completion": 0, "reasoning": 0}
+        n_with_answers = sum(1 for c in combined_candidates.values() if len(c) >= 1)
         n_contested = sum(1 for c in combined_candidates.values() if len(c) > 1)
 
-        if not args.no_adjudicate and n_contested > 0:
+        if not args.no_adjudicate and n_with_answers > 0:
             print("\n" + "=" * 60)
-            print("  PHASE 3: Adjudication (%d contested problems)" % n_contested)
+            print("  PHASE 3: Adjudication (all %d problems, %d contested)" %
+                  (n_with_answers, n_contested))
             print("=" * 60)
 
             # Combine all solution texts (phase 1 + phase 2) for adjudication
