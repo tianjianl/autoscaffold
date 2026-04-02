@@ -167,6 +167,75 @@ def make_batch_jsonl(dataset_name, model, max_completion_tokens, temperature,
     return output_path
 
 
+def make_verification_batch_jsonl(dataset, all_samples, vote_results, candidates,
+                                  model, max_completion_tokens, temperature,
+                                  output_path):
+    """Create verification batch for ALL problems.
+
+    For every problem, send the problem + the best solution from phase 1
+    and ask the model to verify it. For problems with no content (token limit),
+    ask the model to solve from scratch.
+    """
+    ds_by_idx = {row["problem_idx"]: row for row in dataset}
+    n_requests = 0
+    with open(output_path, "w") as f:
+        for idx in sorted(ds_by_idx.keys()):
+            row = ds_by_idx[idx]
+
+            # Get best solution content from phase 1
+            best_content = vote_results.get(idx, "")
+            has_solution = bool(best_content and best_content.strip())
+
+            if has_solution:
+                verify_system = (
+                    "You are an expert competition mathematician reviewing a solution "
+                    "to an HMMT February problem.\n\n"
+                    "Your task:\n"
+                    "1. Read the proposed solution carefully.\n"
+                    "2. Check EVERY step for errors: algebraic mistakes, logical gaps, "
+                    "miscounting, wrong formulas, sign errors.\n"
+                    "3. If the solution is correct, confirm the answer.\n"
+                    "4. If you find ANY error, solve the problem yourself from scratch "
+                    "using a DIFFERENT approach if possible.\n"
+                    "5. You MUST end with \\boxed{answer}.\n"
+                    "6. Simplify fractions. Give exact values (not decimals)."
+                )
+                user_content = (
+                    f"**Problem:**\n{row['problem']}\n\n"
+                    f"**Proposed solution:**\n{best_content}\n\n"
+                    f"Carefully verify this solution. Check each step for errors. "
+                    f"If correct, confirm the answer in \\boxed{{}}. "
+                    f"If incorrect, solve the problem correctly and give the right "
+                    f"answer in \\boxed{{}}."
+                )
+            else:
+                # No content from phase 1 — solve from scratch
+                types = row.get("problem_type", [])
+                primary_type = types[0].strip() if types else ""
+                verify_system = TYPE_SYSTEM_PROMPTS.get(primary_type, SYSTEM_PROMPT)
+                user_content = row["problem"]
+
+            request = {
+                "custom_id": f"verify-{idx}",
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": {
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": verify_system},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "max_completion_tokens": max_completion_tokens,
+                    "temperature": temperature,
+                },
+            }
+            f.write(json.dumps(request) + "\n")
+            n_requests += 1
+
+    print(f"Wrote {n_requests} verification requests (all problems)")
+    return output_path
+
+
 def make_adjudicate_batch_jsonl(dataset, all_samples, candidates, model,
                                 max_completion_tokens, temperature, output_path):
     """Create adjudication batch for contested problems.
@@ -471,6 +540,47 @@ def majority_vote(samples):
     return results, candidates
 
 
+def process_verification_results(raw_text):
+    """Parse verification batch output.
+
+    Returns (answers, token_totals) where answers maps problem_idx to content.
+    """
+    answers = {}
+    totals = {"prompt": 0, "completion": 0, "reasoning": 0}
+
+    for line in raw_text.strip().split("\n"):
+        if not line.strip():
+            continue
+        obj = json.loads(line)
+        custom_id = obj["custom_id"]
+        problem_idx = int(custom_id.split("-")[1])
+
+        response = obj.get("response", {})
+        body = response.get("body", {})
+        error = obj.get("error")
+
+        if error:
+            continue
+
+        choices = body.get("choices", [])
+        usage = body.get("usage", {})
+
+        totals["prompt"] += usage.get("prompt_tokens", 0)
+        totals["completion"] += usage.get("completion_tokens", 0)
+        totals["reasoning"] += (
+            (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+        )
+
+        content = ""
+        if choices:
+            content = choices[0].get("message", {}).get("content") or ""
+
+        if content:
+            answers[problem_idx] = content
+
+    return answers, totals
+
+
 def process_adjudicate_results(raw_text):
     """Parse adjudication batch output.
 
@@ -632,35 +742,176 @@ def main():
         print(f"\nPhase 1 complete: {len(vote_results)} problems, {p1_total:,} tokens")
         print(f"  Unanimous: {n_unanimous}, Contested: {n_contested}")
 
-        final_results = dict(vote_results)
+        # Phase 2: Verification — send best solution to model for checking (all problems)
+        print("\n" + "=" * 60)
+        print("  PHASE 2: Self-verification (all %d problems)" % len(vote_results))
+        print("=" * 60)
+
+        ds = load_dataset(args.dataset, split="train")
+        verify_input = args.output.replace(".jsonl", "_verify_batch_input.jsonl")
+        make_verification_batch_jsonl(ds, samples, vote_results, candidates,
+                                      args.model, args.max_completion_tokens,
+                                      args.temperature, verify_input)
+
+        print("\nUploading verification batch...")
+        file_id2 = upload_file(api_key, verify_input)
+
+        print("\nCreating verification batch...")
+        batch_id2 = create_batch(api_key, file_id2)
+        save_state(state_path, verify_batch_id=batch_id2)
+
+        batch2 = wait_for_batch(api_key, batch_id2, args.poll_interval)
+
+        verify_answers = {}
         phase2_tokens = {"prompt": 0, "completion": 0, "reasoning": 0}
+        if batch2["status"] == "completed":
+            print("\nDownloading phase 2 results...")
+            verify_raw = download_raw(api_key, batch2, "phase2", args.output)
+            if verify_raw:
+                verify_answers, phase2_tokens = process_verification_results(verify_raw)
+                print(f"Verification: {len(verify_answers)} answers received")
+        else:
+            print(f"\nVerification batch failed: {batch2['status']}")
+            print("Using phase 1 results only")
+
+        p2_total = phase2_tokens["prompt"] + phase2_tokens["completion"]
+
+        # Combine phase 1 vote + phase 2 verification via final majority vote
+        # For each problem: phase 1 gave K answers, phase 2 gave 1 verification answer
+        # Re-run majority vote with all K+1 answers
+        final_results = {}
+        for idx in sorted(set(list(vote_results.keys()) + list(verify_answers.keys()))):
+            all_answers = []
+
+            # Phase 1 samples
+            if idx in samples:
+                for content, usage, error in samples[idx]:
+                    if error or not content:
+                        continue
+                    boxed = extract_boxed(content)
+                    if boxed is not None:
+                        rt = ((usage.get("completion_tokens_details") or {})
+                              .get("reasoning_tokens", 0))
+                        all_answers.append((boxed, content, rt))
+
+            # Phase 2 verification answer
+            if idx in verify_answers:
+                v_content = verify_answers[idx]
+                v_boxed = extract_boxed(v_content)
+                if v_boxed is not None:
+                    all_answers.append((v_boxed, v_content, 0))
+
+            if all_answers:
+                # Group semantically equivalent answers
+                groups = []
+                for boxed, content, rt in all_answers:
+                    matched = False
+                    try:
+                        parsed_new = parse(f"${boxed}$")
+                    except Exception:
+                        parsed_new = None
+
+                    if parsed_new:
+                        for i, (rep_boxed, rep_content, count, max_rt) in enumerate(groups):
+                            try:
+                                rep_parsed = parse(f"${rep_boxed}$")
+                                if rep_parsed and verify(rep_parsed, parsed_new):
+                                    if rt > max_rt:
+                                        groups[i] = (rep_boxed, content, count + 1, rt)
+                                    else:
+                                        groups[i] = (rep_boxed, rep_content, count + 1, max_rt)
+                                    matched = True
+                                    break
+                            except Exception:
+                                continue
+
+                    if not matched:
+                        groups.append((boxed, content, 1, rt))
+
+                groups.sort(key=lambda g: (g[2], g[3]), reverse=True)
+                best_boxed, best_content, best_count, _ = groups[0]
+                final_results[idx] = best_content or f"\\boxed{{{best_boxed}}}"
+            else:
+                # Fallback to phase 1 result
+                final_results[idx] = vote_results.get(idx, "")
+
+        # Phase 3: Adjudication for still-contested problems
+        # Rebuild candidates from combined vote
+        combined_candidates = {}
+        for idx in sorted(final_results.keys()):
+            all_answers = []
+            if idx in samples:
+                for content, usage, error in samples[idx]:
+                    if error or not content:
+                        continue
+                    boxed = extract_boxed(content)
+                    if boxed is not None:
+                        all_answers.append(boxed)
+            if idx in verify_answers:
+                v_boxed = extract_boxed(verify_answers[idx])
+                if v_boxed is not None:
+                    all_answers.append(v_boxed)
+
+            # Group and count
+            groups = []
+            for boxed in all_answers:
+                matched = False
+                try:
+                    parsed_new = parse(f"${boxed}$")
+                except Exception:
+                    parsed_new = None
+                if parsed_new:
+                    for i, (rep, cnt) in enumerate(groups):
+                        try:
+                            rep_parsed = parse(f"${rep}$")
+                            if rep_parsed and verify(rep_parsed, parsed_new):
+                                groups[i] = (rep, cnt + 1)
+                                matched = True
+                                break
+                        except Exception:
+                            continue
+                if not matched:
+                    groups.append((boxed, 1))
+            groups.sort(key=lambda g: g[1], reverse=True)
+            combined_candidates[idx] = groups
+
+        # Run adjudication for problems with >1 distinct answer
+        phase3_tokens = {"prompt": 0, "completion": 0, "reasoning": 0}
+        n_contested = sum(1 for c in combined_candidates.values() if len(c) > 1)
 
         if not args.no_adjudicate and n_contested > 0:
-            # Phase 2: Adjudicate contested problems
             print("\n" + "=" * 60)
-            print("  PHASE 2: Adjudication (%d contested problems)" % n_contested)
+            print("  PHASE 3: Adjudication (%d contested problems)" % n_contested)
             print("=" * 60)
 
-            ds = load_dataset(args.dataset, split="train")
+            # Combine all solution texts (phase 1 + phase 2) for adjudication
+            combined_samples = {}
+            for idx in samples:
+                combined_samples[idx] = list(samples[idx])
+            for idx in verify_answers:
+                combined_samples.setdefault(idx, []).append(
+                    (verify_answers[idx], {}, None)
+                )
+
             adj_input = args.output.replace(".jsonl", "_adjudicate_batch_input.jsonl")
-            make_adjudicate_batch_jsonl(ds, samples, candidates, args.model,
-                                        args.max_completion_tokens, args.temperature,
-                                        adj_input)
+            make_adjudicate_batch_jsonl(ds, combined_samples, combined_candidates,
+                                        args.model, args.max_completion_tokens,
+                                        args.temperature, adj_input)
 
             print("\nUploading adjudication batch...")
-            file_id2 = upload_file(api_key, adj_input)
+            file_id3 = upload_file(api_key, adj_input)
 
             print("\nCreating adjudication batch...")
-            batch_id2 = create_batch(api_key, file_id2)
-            save_state(state_path, adjudicate_batch_id=batch_id2)
+            batch_id3 = create_batch(api_key, file_id3)
+            save_state(state_path, adjudicate_batch_id=batch_id3)
 
-            batch2 = wait_for_batch(api_key, batch_id2, args.poll_interval)
+            batch3 = wait_for_batch(api_key, batch_id3, args.poll_interval)
 
-            if batch2["status"] == "completed":
-                print("\nDownloading phase 2 results...")
-                adj_raw = download_raw(api_key, batch2, "phase2", args.output)
+            if batch3["status"] == "completed":
+                print("\nDownloading phase 3 results...")
+                adj_raw = download_raw(api_key, batch3, "phase3", args.output)
                 if adj_raw:
-                    adj_answers, phase2_tokens = process_adjudicate_results(adj_raw)
+                    adj_answers, phase3_tokens = process_adjudicate_results(adj_raw)
                     n_overridden = 0
                     for idx, answer in adj_answers.items():
                         if answer and extract_boxed(answer):
@@ -669,12 +920,11 @@ def main():
                     print(f"Adjudication: {len(adj_answers)} answers, "
                           f"{n_overridden} overridden")
             else:
-                print(f"\nAdjudication batch failed: {batch2['status']}")
-                print("Using phase 1 results only")
+                print(f"\nAdjudication batch failed: {batch3['status']}")
         elif args.no_adjudicate:
             print("\nSkipping adjudication (--no-adjudicate)")
         else:
-            print("\nNo contested problems — skipping adjudication")
+            print("\nAll problems unanimous after verification — skipping adjudication")
 
         # Write final predictions
         predictions = []
@@ -687,14 +937,15 @@ def main():
             for p in predictions:
                 f.write(json.dumps(p) + "\n")
 
-        p2_total = phase2_tokens["prompt"] + phase2_tokens["completion"]
-        grand_total = p1_total + p2_total
+        p3_total = phase3_tokens["prompt"] + phase3_tokens["completion"]
+        grand_total = p1_total + p2_total + p3_total
 
         print(f"\n{'=' * 60}")
         print(f"  Results: {len(predictions)} predictions written")
         print(f"  Token usage:")
         print(f"    Phase 1:    {p1_total:>10,}")
         print(f"    Phase 2:    {p2_total:>10,}")
+        print(f"    Phase 3:    {p3_total:>10,}")
         print(f"    Total:      {grand_total:>10,}")
         print(f"  Output: {args.output}")
         print(f"{'=' * 60}")
