@@ -23,6 +23,7 @@ from math_verify import parse, verify
 OPENAI_URL = "https://api.openai.com/v1"
 
 NUM_SAMPLES = 3
+NUM_VERIFY_SAMPLES = 2
 
 # --- System prompts (type-specific) ---
 
@@ -215,24 +216,25 @@ def make_verification_batch_jsonl(dataset, all_samples, vote_results, candidates
                 verify_system = TYPE_SYSTEM_PROMPTS.get(primary_type, SYSTEM_PROMPT)
                 user_content = row["problem"]
 
-            request = {
-                "custom_id": f"verify-{idx}",
-                "method": "POST",
-                "url": "/v1/chat/completions",
-                "body": {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": verify_system},
-                        {"role": "user", "content": user_content},
-                    ],
-                    "max_completion_tokens": max_completion_tokens,
-                    "temperature": temperature,
-                },
-            }
-            f.write(json.dumps(request) + "\n")
-            n_requests += 1
+            for k in range(NUM_VERIFY_SAMPLES):
+                request = {
+                    "custom_id": f"verify-{idx}-sample-{k}",
+                    "method": "POST",
+                    "url": "/v1/chat/completions",
+                    "body": {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": verify_system},
+                            {"role": "user", "content": user_content},
+                        ],
+                        "max_completion_tokens": max_completion_tokens,
+                        "temperature": temperature,
+                    },
+                }
+                f.write(json.dumps(request) + "\n")
+                n_requests += 1
 
-    print(f"Wrote {n_requests} verification requests (all problems)")
+    print(f"Wrote {n_requests} verification requests (all problems, {NUM_VERIFY_SAMPLES} each)")
     return output_path
 
 
@@ -541,11 +543,12 @@ def majority_vote(samples):
 
 
 def process_verification_results(raw_text):
-    """Parse verification batch output.
+    """Parse verification batch output with multiple samples per problem.
 
-    Returns (answers, token_totals) where answers maps problem_idx to content.
+    Returns (samples_dict, token_totals) where samples_dict maps
+    problem_idx to list of (content, usage, error) tuples.
     """
-    answers = {}
+    samples = {}
     totals = {"prompt": 0, "completion": 0, "reasoning": 0}
 
     for line in raw_text.strip().split("\n"):
@@ -553,13 +556,15 @@ def process_verification_results(raw_text):
             continue
         obj = json.loads(line)
         custom_id = obj["custom_id"]
-        problem_idx = int(custom_id.split("-")[1])
+        parts = custom_id.split("-")
+        problem_idx = int(parts[1])
 
         response = obj.get("response", {})
         body = response.get("body", {})
         error = obj.get("error")
 
         if error:
+            samples.setdefault(problem_idx, []).append(("", {}, str(error)))
             continue
 
         choices = body.get("choices", [])
@@ -575,10 +580,9 @@ def process_verification_results(raw_text):
         if choices:
             content = choices[0].get("message", {}).get("content") or ""
 
-        if content:
-            answers[problem_idx] = content
+        samples.setdefault(problem_idx, []).append((content, usage, None))
 
-    return answers, totals
+    return samples, totals
 
 
 def process_adjudicate_results(raw_text):
@@ -762,25 +766,28 @@ def main():
 
         batch2 = wait_for_batch(api_key, batch_id2, args.poll_interval)
 
-        verify_answers = {}
+        verify_samples = {}
         phase2_tokens = {"prompt": 0, "completion": 0, "reasoning": 0}
         if batch2["status"] == "completed":
             print("\nDownloading phase 2 results...")
             verify_raw = download_raw(api_key, batch2, "phase2", args.output)
             if verify_raw:
-                verify_answers, phase2_tokens = process_verification_results(verify_raw)
-                print(f"Verification: {len(verify_answers)} answers received")
+                verify_samples, phase2_tokens = process_verification_results(verify_raw)
+                print(f"Verification: {len(verify_samples)} problems, "
+                      f"{sum(len(v) for v in verify_samples.values())} samples")
         else:
             print(f"\nVerification batch failed: {batch2['status']}")
             print("Using phase 1 results only")
 
         p2_total = phase2_tokens["prompt"] + phase2_tokens["completion"]
 
-        # Combine phase 1 vote + phase 2 verification via final majority vote
-        # For each problem: phase 1 gave K answers, phase 2 gave 1 verification answer
-        # Re-run majority vote with all K+1 answers
+        # Combine phase 1 + phase 2 samples via majority vote
+        # Phase 1: K answers, Phase 2: NUM_VERIFY_SAMPLES answers
         final_results = {}
-        for idx in sorted(set(list(vote_results.keys()) + list(verify_answers.keys()))):
+        all_problem_idxs = sorted(set(
+            list(vote_results.keys()) + list(verify_samples.keys())
+        ))
+        for idx in all_problem_idxs:
             all_answers = []
 
             # Phase 1 samples
@@ -794,12 +801,16 @@ def main():
                               .get("reasoning_tokens", 0))
                         all_answers.append((boxed, content, rt))
 
-            # Phase 2 verification answer
-            if idx in verify_answers:
-                v_content = verify_answers[idx]
-                v_boxed = extract_boxed(v_content)
-                if v_boxed is not None:
-                    all_answers.append((v_boxed, v_content, 0))
+            # Phase 2 verification samples
+            if idx in verify_samples:
+                for v_content, v_usage, v_error in verify_samples[idx]:
+                    if v_error or not v_content:
+                        continue
+                    v_boxed = extract_boxed(v_content)
+                    if v_boxed is not None:
+                        v_rt = ((v_usage.get("completion_tokens_details") or {})
+                                .get("reasoning_tokens", 0))
+                        all_answers.append((v_boxed, v_content, v_rt))
 
             if all_answers:
                 # Group semantically equivalent answers
@@ -838,23 +849,26 @@ def main():
         # Phase 3: Adjudication for still-contested problems
         # Rebuild candidates from combined vote
         combined_candidates = {}
-        for idx in sorted(final_results.keys()):
-            all_answers = []
+        for idx in all_problem_idxs:
+            all_boxed = []
             if idx in samples:
                 for content, usage, error in samples[idx]:
                     if error or not content:
                         continue
                     boxed = extract_boxed(content)
                     if boxed is not None:
-                        all_answers.append(boxed)
-            if idx in verify_answers:
-                v_boxed = extract_boxed(verify_answers[idx])
-                if v_boxed is not None:
-                    all_answers.append(v_boxed)
+                        all_boxed.append(boxed)
+            if idx in verify_samples:
+                for v_content, v_usage, v_error in verify_samples[idx]:
+                    if v_error or not v_content:
+                        continue
+                    v_boxed = extract_boxed(v_content)
+                    if v_boxed is not None:
+                        all_boxed.append(v_boxed)
 
             # Group and count
             groups = []
-            for boxed in all_answers:
+            for boxed in all_boxed:
                 matched = False
                 try:
                     parsed_new = parse(f"${boxed}$")
@@ -888,10 +902,11 @@ def main():
             combined_samples = {}
             for idx in samples:
                 combined_samples[idx] = list(samples[idx])
-            for idx in verify_answers:
-                combined_samples.setdefault(idx, []).append(
-                    (verify_answers[idx], {}, None)
-                )
+            for idx in verify_samples:
+                for v_content, v_usage, v_error in verify_samples[idx]:
+                    combined_samples.setdefault(idx, []).append(
+                        (v_content, v_usage, v_error)
+                    )
 
             adj_input = args.output.replace(".jsonl", "_adjudicate_batch_input.jsonl")
             make_adjudicate_batch_jsonl(ds, combined_samples, combined_candidates,
