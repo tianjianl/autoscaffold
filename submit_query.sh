@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=01:00:00
-#SBATCH --output=query_hmmt_%j.out
-#SBATCH --error=query_hmmt_%j.err
+#SBATCH --output=slurm_logs/query_hmmt_%j.out
+#SBATCH --error=slurm_logs/query_hmmt_%j.err
 
 set -eo pipefail
 
@@ -24,7 +24,7 @@ echo ""
 
 # Query all 33 problems
 python query_model.py \
-    --output predictions.jsonl \
+    --output model_outputs/predictions.jsonl \
     --model qwen/qwen3.5-9b \
     --workers 33 \
     --max-total-tokens 2500000 \
@@ -34,7 +34,7 @@ python query_model.py \
 echo ""
 echo "--- Grading results ---"
 python grade.py \
-    --predictions predictions.jsonl \
+    --predictions model_outputs/predictions.jsonl \
     --workers 8 \
     --verbose
 

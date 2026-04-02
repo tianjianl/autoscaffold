@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --time=06:00:00
-#SBATCH --output=rc_gpt5nano_%j.out
-#SBATCH --error=rc_gpt5nano_%j.err
+#SBATCH --output=slurm_logs/rc_gpt5nano_%j.out
+#SBATCH --error=slurm_logs/rc_gpt5nano_%j.err
 
 set -eo pipefail
 
@@ -23,7 +23,7 @@ echo "API key set: $([ -n "${OPENAI_API_KEY:-}" ] && echo 'yes' || echo 'no')"
 echo ""
 
 python rc_scaffold.py \
-    --output predictions_rc.jsonl \
+    --output model_outputs/predictions_rc.jsonl \
     --model gpt-5-nano \
     --max-completion-tokens 20000 \
     --max-summarization-tokens 4000 \
@@ -36,7 +36,7 @@ python rc_scaffold.py \
 echo ""
 echo "--- Grading results ---"
 python grade.py \
-    --predictions predictions_rc.jsonl \
+    --predictions model_outputs/predictions_rc.jsonl \
     --workers 8 \
     --verbose
 

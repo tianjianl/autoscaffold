@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-RC (Reasoning Cache) scaffold for GPT-5-nano on HMMT Feb 2026 via OpenAI Batch API.
+RC (Reasoning Cache) scaffold for GPT-5-nano on HMMT Feb 2026 via OpenAI API.
 
 Multi-step pipeline (T steps per problem):
   For each step t = 1..T:
-    1. Reasoning batch: solve/re-solve conditioned on cached summary
-    2. Summarization batch: compress reasoning into compact summary
+    1. Reasoning: solve/re-solve conditioned on cached summary
+    2. Summarization: compress reasoning into compact summary
   Final answer: \\boxed{} from last reasoning step (majority vote if N > 1)
+
+Supports both direct concurrent API calls (default) and batch API (--batch).
 
 Prompts from: context_engineering/rc (Reasoning Cache, 2026)
 
@@ -19,6 +21,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from datasets import load_dataset
@@ -301,6 +304,86 @@ def submit_and_wait(api_key, batch_input_path, label, output_dir, poll_interval,
     return download_batch_output(api_key, batch, label, output_dir)
 
 
+def call_api_direct(api_key, custom_id, body, max_retries=5):
+    """Make a single direct chat completion call with retries."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                f"{OPENAI_URL}/chat/completions",
+                headers=headers,
+                json=body,
+                timeout=600,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                wait = min(2 ** attempt * 5, 60)
+                print(f"    {custom_id}: {resp.status_code}, retry in {wait}s")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            return custom_id, data, None
+        except requests.exceptions.RequestException as e:
+            wait = min(2 ** attempt * 5, 60)
+            print(f"    {custom_id}: error {e}, retry in {wait}s")
+            time.sleep(wait)
+    return custom_id, None, f"failed after {max_retries} retries"
+
+
+def submit_direct(api_key, batch_input_path, label, output_dir, workers=10):
+    """Send requests concurrently via direct API. Returns raw JSONL text."""
+    # Read batch input
+    reqs = []
+    with open(batch_input_path) as f:
+        for line in f:
+            if line.strip():
+                reqs.append(json.loads(line))
+
+    print(f"    Sending {len(reqs)} requests ({workers} concurrent)...")
+    results = []
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for req in reqs:
+            fut = executor.submit(
+                call_api_direct, api_key, req["custom_id"], req["body"]
+            )
+            futures[fut] = req["custom_id"]
+
+        for fut in as_completed(futures):
+            custom_id, data, error = fut.result()
+            completed += 1
+            if error:
+                results.append({
+                    "custom_id": custom_id,
+                    "response": {"body": {}},
+                    "error": error,
+                })
+            else:
+                results.append({
+                    "custom_id": custom_id,
+                    "response": {"body": data},
+                    "error": None,
+                })
+            if completed % max(1, len(reqs) // 5) == 0 or completed == len(reqs):
+                print(f"      {completed}/{len(reqs)} done")
+
+    # Save raw output
+    raw_path = os.path.join(output_dir, f"{label}_raw.jsonl")
+    lines = []
+    for r in results:
+        lines.append(json.dumps(r))
+    raw_text = "\n".join(lines)
+    with open(raw_path, "w") as f:
+        f.write(raw_text)
+    print(f"    Raw output saved: {raw_path}")
+    return raw_text
+
+
 def parse_batch_results(raw_text):
     """Parse raw batch JSONL into {custom_id: (content, usage, error)}."""
     results = {}
@@ -362,10 +445,14 @@ def main():
                         help="Reasoning-summarization iterations T (default: 3)")
     parser.add_argument("--n", type=int, default=1,
                         help="Samples per problem N (default: 1)")
+    parser.add_argument("--workers", type=int, default=10,
+                        help="Concurrent API workers for direct mode (default: 10)")
+    parser.add_argument("--batch", action="store_true",
+                        help="Use Batch API instead of direct concurrent calls")
     parser.add_argument("--run", action="store_true",
                         help="Run full RC pipeline")
     parser.add_argument("--submit", action="store_true",
-                        help="Submit first reasoning batch only")
+                        help="Submit first reasoning batch only (batch mode)")
 
     args = parser.parse_args()
 
@@ -474,10 +561,15 @@ def main():
             return
 
         label = f"{base}_step{step + 1}_reasoning"
-        raw_text = submit_and_wait(
-            api_key, reason_input, label, output_dir,
-            args.poll_interval, state_path,
-        )
+        if args.batch:
+            raw_text = submit_and_wait(
+                api_key, reason_input, label, output_dir,
+                args.poll_interval, state_path,
+            )
+        else:
+            raw_text = submit_direct(
+                api_key, reason_input, label, output_dir, args.workers,
+            )
         if not raw_text:
             print(f"  FATAL: Reasoning batch failed at step {step + 1}")
             sys.exit(1)
@@ -527,10 +619,15 @@ def main():
                 f.write(json.dumps(request) + "\n")
 
         label = f"{base}_step{step + 1}_summarization"
-        raw_text = submit_and_wait(
-            api_key, summ_input, label, output_dir,
-            args.poll_interval, state_path,
-        )
+        if args.batch:
+            raw_text = submit_and_wait(
+                api_key, summ_input, label, output_dir,
+                args.poll_interval, state_path,
+            )
+        else:
+            raw_text = submit_direct(
+                api_key, summ_input, label, output_dir, args.workers,
+            )
         if not raw_text:
             print(f"  WARNING: Summarization failed at step {step + 1}")
             print("  Continuing with current summaries")

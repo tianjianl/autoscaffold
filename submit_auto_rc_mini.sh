@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=auto_rc_aime2026
+#SBATCH --job-name=auto_rc_mini_hmmt
 #SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --time=06:00:00
-#SBATCH --output=slurm_logs/auto_rc_aime2026_%j.out
-#SBATCH --error=slurm_logs/auto_rc_aime2026_%j.err
+#SBATCH --output=slurm_logs/auto_rc_mini_hmmt_%j.out
+#SBATCH --error=slurm_logs/auto_rc_mini_hmmt_%j.err
 
 set -eo pipefail
 
@@ -15,28 +15,26 @@ set +u
 source ~/.bashrc
 set -u
 
-echo "=== Auto-RC Scaffold: GPT-5-nano AIME 2026 ==="
+echo "=== Auto-RC Scaffold: GPT-5-mini HMMT Feb 2026 ==="
 echo "Date: $(date)"
 echo "Host: $(hostname)"
 echo "API key set: $([ -n "${OPENAI_API_KEY:-}" ] && echo 'yes' || echo 'no')"
 echo ""
 
 python auto_rc.py \
-    --output model_outputs/predictions_auto_rc_aime.jsonl \
-    --model gpt-5-nano \
+    --output model_outputs/predictions_auto_rc_mini.jsonl \
+    --model gpt-5-mini \
     --max-completion-tokens 20000 \
     --max-summarization-tokens 4000 \
     --temperature 1 \
     --max-steps 5 \
-    --dataset MathArena/aime_2026 \
     --poll-interval 30 \
     --run
 
 echo ""
 echo "--- Grading results ---"
 python grade.py \
-    --predictions model_outputs/predictions_auto_rc_aime.jsonl \
-    --dataset MathArena/aime_2026 \
+    --predictions model_outputs/predictions_auto_rc_mini.jsonl \
     --workers 8 \
     --verbose
 

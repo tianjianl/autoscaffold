@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --time=06:00:00
-#SBATCH --output=auto_rc_hmmt_%j.out
-#SBATCH --error=auto_rc_hmmt_%j.err
+#SBATCH --output=slurm_logs/auto_rc_hmmt_%j.out
+#SBATCH --error=slurm_logs/auto_rc_hmmt_%j.err
 
 set -eo pipefail
 
@@ -22,7 +22,7 @@ echo "API key set: $([ -n "${OPENAI_API_KEY:-}" ] && echo 'yes' || echo 'no')"
 echo ""
 
 python auto_rc.py \
-    --output predictions_auto_rc.jsonl \
+    --output model_outputs/predictions_auto_rc.jsonl \
     --model gpt-5-nano \
     --max-completion-tokens 20000 \
     --max-summarization-tokens 4000 \
@@ -34,7 +34,7 @@ python auto_rc.py \
 echo ""
 echo "--- Grading results ---"
 python grade.py \
-    --predictions predictions_auto_rc.jsonl \
+    --predictions model_outputs/predictions_auto_rc.jsonl \
     --workers 8 \
     --verbose
 
